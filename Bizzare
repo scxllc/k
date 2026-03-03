@@ -1,0 +1,954 @@
+loadstring(game:HttpGet('https://raw.githubusercontent.com/scxllc/jade/refs/heads/main/jade'))()
+local runServiceVM = loadstring(game:HttpGet('https://pastebin.com/raw/jFXZEJSy'))()
+
+local ui = UILib
+if not ui then return end
+if type(runServiceVM) ~= "table" then runServiceVM = nil end
+
+local players   = game:GetService("Players")
+local workspace = game:GetService("Workspace")
+local player    = players.LocalPlayer
+
+
+local config = {
+    itemCacheRefreshInterval = 0.75,
+    fallbackDeltaTime        = 0.016,
+    maxTrackedItems          = 300,
+    maxRenderedItems         = 150,
+    addressRetentionSeconds  = 240,
+    safeSpot                 = Vector3.new(1077.64, 936.01, -1391.41),
+    npcMaxDistance            = 1000,
+}
+
+local trackedItems = {
+    { name = "Stone Mask",                short = "Stone Mask",       color = Color3.fromRGB(200, 200, 200) },
+    { name = "Imperfect Aja",             short = "Imperfect Aja",    color = Color3.fromRGB(255, 80,  80)  },
+    { name = "Red Stone of Aja",          short = "Red Stone of Aja", color = Color3.fromRGB(255, 30,  30)  },
+    { name = "Lucky Arrow",               short = "Lucky Arrow",      color = Color3.fromRGB(255, 215, 0)   },
+    { name = "Rokakaka",                  short = "Rokakaka",         color = Color3.fromRGB(0,   200, 80)  },
+    { name = "Stat Point Essence",        short = "Stat Pt Essence",  color = Color3.fromRGB(80,  160, 255) },
+    { name = "Stand Arrow",               short = "Stand Arrow",      color = Color3.fromRGB(255, 165, 0)   },
+    { name = "DIO's Diary",               short = "DIO's Diary",      color = Color3.fromRGB(180, 0,   255) },
+    { name = "Stand Skin Essence",        short = "Skin Essence",     color = Color3.fromRGB(255, 100, 200) },
+    { name = "Stand Stat Essence",        short = "Stat Essence",     color = Color3.fromRGB(100, 220, 255) },
+    { name = "Stand Personality Essence", short = "Pers Essence",     color = Color3.fromRGB(255, 200, 100) },
+    { name = "Stand Conjuration Essence", short = "Conj Essence",     color = Color3.fromRGB(160, 100, 255) },
+    { name = "Motorcycle Tire",           short = "Moto Tire",        color = Color3.fromRGB(120, 120, 120) },
+    { name = "Motorcycle Body",           short = "Moto Body",        color = Color3.fromRGB(80,  80,  80)  },
+    { name = "Custom Clothing Essence",   short = "Clothing Ess",     color = Color3.fromRGB(255, 150, 50)  },
+    { name = "Lucky Personality Essence", short = "Lucky Pers Ess",   color = Color3.fromRGB(255, 255, 50)  },
+    { name = "Face Reroll",               short = "Face Reroll",      color = Color3.fromRGB(50,  255, 200) },
+}
+
+local trackedItemLookup = {}
+for _, item in ipairs(trackedItems) do
+    trackedItemLookup[item.name] = true
+end
+
+local trackedItemNames = {}
+for _, item in ipairs(trackedItems) do
+    table.insert(trackedItemNames, item.name)
+end
+
+
+local state = {
+    shouldUnload             = false,
+    itemESP                  = false,
+    espShowBox               = true,
+    espShowName              = true,
+    espShowDistance           = true,
+    espShowTracers           = false,
+    itemCacheRefreshInterval = 0.2,
+    maxRenderedItems         = config.maxRenderedItems,
+    itemCache                = {},
+    itemCacheLastRefresh     = 0,
+    seenItemAddresses        = {},
+    itemScanInitialized      = false,
+    itemColors               = {},
+
+    npcESP                   = false,
+    npcShowBox               = true,
+    npcShowName              = true,
+    npcShowDistance           = true,
+    npcShowTracers           = true,
+    npcMaxDistance            = config.npcMaxDistance,
+    npcColor                 = Color3.fromRGB(0, 200, 120),
+    npcCache                 = {},
+    npcCacheLastRefresh      = 0,
+
+    frameErrorCount          = 0,
+    runtimeCooldownUntil     = 0,
+
+    autoCollect              = false,
+    collectSafeSpot          = false,
+    collectTargetNames       = {},
+    collectThread            = nil,
+
+    raidTarget               = nil,
+    npcKillerEnabled         = false,
+    npcMethod                = "Under",
+    orbitRadius              = 8,
+    orbitSpeed               = 2,
+    orbitThread              = nil,
+    underDepth               = 5,
+    underThread              = nil,
+    backDistance              = 6,
+    backThread               = nil,
+    topHeight                = 6,
+    topThread                = nil,
+}
+
+for _, item in ipairs(trackedItems) do
+    state.itemColors[item.name] = item.color
+end
+
+if _G.__bizzareLineageUnload then
+    pcall(_G.__bizzareLineageUnload)
+    task.wait(0.05)
+end
+
+local itemDrawings = {}
+local npcDrawings  = {}
+
+
+local function distance3D(a, b)
+    local dx = a.X - b.X
+    local dy = a.Y - b.Y
+    local dz = a.Z - b.Z
+    return math.sqrt(dx*dx + dy*dy + dz*dz)
+end
+
+
+local function resolveWorldPosition(instance)
+    if not instance then return nil end
+    if instance:IsA("BasePart") then return instance.Position end
+    if instance:IsA("Model") and instance.PrimaryPart then return instance.PrimaryPart.Position end
+    local p = instance:FindFirstChildWhichIsA("BasePart")
+    if p then return p.Position end
+    for _, d in ipairs(instance:GetDescendants()) do
+        if d:IsA("BasePart") then return d.Position end
+    end
+    return nil
+end
+
+local function getItemAddressKey(instance)
+    local ok, addr = pcall(function() return instance.Address end)
+    if ok and addr then return string.format("0x%X", addr) end
+    local ok2, full = pcall(function() return instance:GetFullName() end)
+    if ok2 and full then return full end
+    return tostring(instance)
+end
+
+local function getRootPart()
+    local char = player and player.Character
+    if not char then return nil end
+    return char:FindFirstChild("HumanoidRootPart")
+        or char:FindFirstChild("Torso")
+        or char:FindFirstChild("UpperTorso")
+end
+
+local function teleportTo(pos)
+    local root = getRootPart()
+    if root then
+        pcall(function() root.Position = pos end)
+    end
+end
+
+
+local primOffset = 328
+local rotOffset  = 192
+
+local function getLookAtMatrix(fromPos, toPos)
+    local dx, dy, dz = toPos.X - fromPos.X, toPos.Y - fromPos.Y, toPos.Z - fromPos.Z
+    local zx, zy, zz = -dx, -dy, -dz
+    local zmag = math.sqrt(zx*zx + zy*zy + zz*zz)
+    if zmag == 0 then return {1, 0, 0, 0, 1, 0, 0, 0, 1} end
+    zx, zy, zz = zx/zmag, zy/zmag, zz/zmag
+    local ux, uy, uz = 0, 1, 0
+    if math.abs(zy) > 0.9999 then ux, uy, uz = 0, 0, 1 end
+    local xx, xy, xz = uy*zz - uz*zy, uz*zx - ux*zz, ux*zy - uy*zx
+    local xmag = math.sqrt(xx*xx + xy*xy + xz*xz)
+    xx, xy, xz = xx/xmag, xy/xmag, xz/xmag
+    local yx, yy, yz = zy*xz - zz*xy, zz*xx - zx*xz, zx*xy - zy*xx
+    return {xx, yx, zx, xy, yy, zy, xz, yz, zz}
+end
+
+local function lookAtStep()
+    if not state.npcKillerEnabled then return end
+    local lp = player
+    if not lp or not lp.Character then return end
+    local myHrp = lp.Character:FindFirstChild("HumanoidRootPart")
+    if not myHrp then return end
+    local target = state.raidTarget
+    if not target or not target.Parent then return end
+    local targetPos = target:FindFirstChild("HumanoidRootPart")
+        and target.HumanoidRootPart.Position
+        or resolveWorldPosition(target)
+    if not targetPos then return end
+    local mat  = getLookAtMatrix(myHrp.Position, targetPos)
+    local addr = tonumber(myHrp.Address)
+    if not addr or addr == 0 then return end
+    local prim = memory_read("uintptr_t", addr + primOffset)
+    if not prim or prim == 0 then return end
+    for i = 1, 9 do
+        memory_write("float", prim + rotOffset + ((i - 1) * 4), mat[i])
+    end
+end
+
+task.spawn(function()
+    while true do
+        pcall(lookAtStep)
+        task.wait()
+    end
+end)
+
+
+local function getClosestRaidNPC()
+    local myChar = player.Character
+    if not myChar then return nil end
+    local myHRP = myChar:FindFirstChild("HumanoidRootPart")
+    if not myHRP then return nil end
+    local liveFolder = workspace:FindFirstChild("Live")
+    if not liveFolder then return nil end
+    local myPos = myHRP.Position
+    local closestDist, closestNPC = math.huge, nil
+
+    for _, npc in ipairs(liveFolder:GetChildren()) do
+        pcall(function()
+            if npc.Name == player.Name or npc.Name == "Server" then return end
+            if not npc:IsA("Model") then return end
+            if npc.Name:find("ostage") then return end
+            local humanoid = npc:FindFirstChild("Humanoid")
+            local hrp      = npc:FindFirstChild("HumanoidRootPart")
+            if humanoid and hrp and humanoid.Health > 0 then
+                local d = distance3D(hrp.Position, myPos)
+                if d < closestDist then
+                    closestDist = d
+                    closestNPC  = npc
+                end
+            end
+        end)
+    end
+
+    return closestNPC
+end
+
+local function isRaidTargetValid(target)
+    if not target or not target.Parent then return false end
+    local ok, result = pcall(function()
+        local humanoid = target:FindFirstChild("Humanoid")
+        local hrp      = target:FindFirstChild("HumanoidRootPart")
+        return humanoid and hrp and humanoid.Health > 0
+    end)
+    return ok and result
+end
+
+local function ensureRaidTarget()
+    if not isRaidTargetValid(state.raidTarget) then
+        state.raidTarget = getClosestRaidNPC()
+    end
+    return state.raidTarget
+end
+
+
+local function orbitLoop()
+    while state.npcKillerEnabled and state.npcMethod == "Orbit" and not state.shouldUnload do
+        pcall(function()
+            local myChar = player.Character
+            if not myChar then return end
+            local myHRP = myChar:FindFirstChild("HumanoidRootPart")
+            if not myHRP then return end
+            local target = ensureRaidTarget()
+            if not target then return end
+            local targetHRP = target:FindFirstChild("HumanoidRootPart")
+            if not targetHRP then state.raidTarget = nil; return end
+            local targetPos  = targetHRP.Position
+            local orbitAngle = os.clock() * state.orbitSpeed
+            local offsetX    = math.cos(orbitAngle) * state.orbitRadius
+            local offsetZ    = math.sin(orbitAngle) * state.orbitRadius
+            pcall(function()
+                myHRP.Position = Vector3.new(
+                    targetPos.X + offsetX,
+                    targetPos.Y,
+                    targetPos.Z + offsetZ
+                )
+            end)
+            pcall(mouse1press)
+        end)
+        task.wait()
+    end
+    pcall(mouse1release)
+end
+
+local function underLoop()
+    while state.npcKillerEnabled and state.npcMethod == "Under" and not state.shouldUnload do
+        pcall(function()
+            local myChar = player.Character
+            if not myChar then return end
+            local myHRP = myChar:FindFirstChild("HumanoidRootPart")
+            if not myHRP then return end
+            local target = ensureRaidTarget()
+            if not target then return end
+            local targetHRP = target:FindFirstChild("HumanoidRootPart")
+            if not targetHRP then state.raidTarget = nil; return end
+            local targetPos = targetHRP.Position
+            pcall(function()
+                myHRP.Position = Vector3.new(
+                    targetPos.X,
+                    targetPos.Y - state.underDepth,
+                    targetPos.Z
+                )
+            end)
+            pcall(mouse1press)
+        end)
+        task.wait()
+    end
+    pcall(mouse1release)
+end
+
+local function backLoop()
+    while state.npcKillerEnabled and state.npcMethod == "Back" and not state.shouldUnload do
+        pcall(function()
+            local myChar = player.Character
+            if not myChar then return end
+            local myHRP = myChar:FindFirstChild("HumanoidRootPart")
+            if not myHRP then return end
+            local target = ensureRaidTarget()
+            if not target then return end
+            local targetHRP = target:FindFirstChild("HumanoidRootPart")
+            if not targetHRP then state.raidTarget = nil; return end
+            local cf        = targetHRP.CFrame
+            local targetPos = cf.Position
+            local look      = cf.LookVector
+            local offset    = -look * state.backDistance
+            pcall(function()
+                myHRP.Position = Vector3.new(
+                    targetPos.X + offset.X,
+                    targetPos.Y,
+                    targetPos.Z + offset.Z
+                )
+            end)
+            pcall(mouse1press)
+        end)
+        task.wait()
+    end
+    pcall(mouse1release)
+end
+
+local function topLoop()
+    while state.npcKillerEnabled and state.npcMethod == "Top" and not state.shouldUnload do
+        pcall(function()
+            local myChar = player.Character
+            if not myChar then return end
+            local myHRP = myChar:FindFirstChild("HumanoidRootPart")
+            if not myHRP then return end
+            local target = ensureRaidTarget()
+            if not target then return end
+            local targetHRP = target:FindFirstChild("HumanoidRootPart")
+            if not targetHRP then state.raidTarget = nil; return end
+            local targetPos = targetHRP.Position
+            pcall(function()
+                myHRP.Position = Vector3.new(
+                    targetPos.X,
+                    targetPos.Y + state.topHeight,
+                    targetPos.Z
+                )
+            end)
+            pcall(mouse1press)
+        end)
+        task.wait()
+    end
+    pcall(mouse1release)
+end
+
+local function startOrbit()  if state.orbitThread then task.cancel(state.orbitThread) end; state.raidTarget = nil; state.orbitThread = task.spawn(orbitLoop) end
+local function stopOrbit()   if state.orbitThread then task.cancel(state.orbitThread); state.orbitThread = nil end; pcall(mouse1release) end
+local function startUnder()  if state.underThread then task.cancel(state.underThread) end; state.raidTarget = nil; state.underThread = task.spawn(underLoop) end
+local function stopUnder()   if state.underThread then task.cancel(state.underThread); state.underThread = nil end; pcall(mouse1release) end
+local function startBack()   if state.backThread then task.cancel(state.backThread) end; state.raidTarget = nil; state.backThread = task.spawn(backLoop) end
+local function stopBack()    if state.backThread then task.cancel(state.backThread); state.backThread = nil end; pcall(mouse1release) end
+local function startTop()    if state.topThread then task.cancel(state.topThread) end; state.raidTarget = nil; state.topThread = task.spawn(topLoop) end
+local function stopTop()     if state.topThread then task.cancel(state.topThread); state.topThread = nil end; pcall(mouse1release) end
+
+local function stopAllNpcKillerLoops() stopOrbit(); stopUnder(); stopBack(); stopTop() end
+
+local function startNpcKillerForCurrentMethod()
+    stopAllNpcKillerLoops()
+    if not state.npcKillerEnabled then return end
+    if state.npcMethod == "Orbit" then startOrbit()
+    elseif state.npcMethod == "Back" then startBack()
+    elseif state.npcMethod == "Top" then startTop()
+    else startUnder() end
+end
+
+
+local function refreshItemCache()
+    local now = os.clock()
+    if now - state.itemCacheLastRefresh < state.itemCacheRefreshInterval then return end
+    state.itemCacheLastRefresh = now
+    state.itemCache = {}
+    local seenThisScan = {}
+
+    local ok, children = pcall(function() return workspace:GetChildren() end)
+    if not ok or not children then return end
+
+    for _, child in ipairs(children) do
+        if child.Name == "Model" then
+            local ok2, descs = pcall(function() return child:GetDescendants() end)
+            if ok2 and descs then
+                for _, obj in ipairs(descs) do
+                    if trackedItemLookup[obj.Name] then
+                        local key = getItemAddressKey(obj)
+                        if not seenThisScan[key] then
+                            seenThisScan[key] = true
+                            table.insert(state.itemCache, obj)
+                            state.seenItemAddresses[key] = now
+                            if #state.itemCache >= config.maxTrackedItems then break end
+                        end
+                    end
+                end
+            end
+        end
+        if #state.itemCache >= config.maxTrackedItems then break end
+    end
+
+    for key, lastSeen in pairs(state.seenItemAddresses) do
+        if now - lastSeen > config.addressRetentionSeconds then
+            state.seenItemAddresses[key] = nil
+        end
+    end
+
+    state.itemScanInitialized = true
+end
+
+local function findTargetItem()
+    local root = getRootPart()
+    local rootPos = root and root.Position
+    local bestInst, bestPos, bestDist = nil, nil, math.huge
+
+    for _, obj in ipairs(state.itemCache) do
+        if obj.Parent and state.collectTargetNames[obj.Name] then
+            local ok, worldPos = pcall(resolveWorldPosition, obj)
+            if ok and worldPos then
+                local d = rootPos and distance3D(worldPos, rootPos) or 0
+                if d < bestDist then
+                    bestDist = d
+                    bestInst = obj
+                    bestPos  = worldPos
+                end
+            end
+        end
+    end
+
+    return bestInst, bestPos
+end
+
+local function autoCollectLoop()
+    state.itemCacheLastRefresh = 0
+    refreshItemCache()
+
+    local searchStart = os.clock()
+
+    while state.autoCollect and not state.shouldUnload do
+        refreshItemCache()
+
+        local target, targetPos = findTargetItem()
+
+        if not target or not targetPos then
+            if os.clock() - searchStart >= 1.5 then
+                if state.collectSafeSpot then
+                    teleportTo(config.safeSpot)
+                end
+                task.wait(0.5)
+            else
+                task.wait(0.1)
+            end
+        else
+            searchStart = os.clock()
+
+            local pickupPos = Vector3.new(targetPos.X, targetPos.Y + 5, targetPos.Z)
+            teleportTo(pickupPos)
+            task.wait(0.15)
+            task.wait(0.5)
+
+            if keypress then pcall(keypress, 0x45) end
+            task.wait(2.0)
+            if keyrelease then pcall(keyrelease, 0x45) end
+
+            task.wait(0.2)
+
+            state.itemCacheLastRefresh = 0
+            refreshItemCache()
+
+            local nextTarget, _ = findTargetItem()
+            if not nextTarget then
+                searchStart = os.clock()
+            end
+        end
+    end
+
+    if keyrelease then pcall(keyrelease, 0x45) end
+end
+
+local function startAutoCollect()
+    if state.collectThread then task.cancel(state.collectThread); state.collectThread = nil end
+    state.collectThread = task.spawn(autoCollectLoop)
+end
+
+local function stopAutoCollect()
+    if state.collectThread then task.cancel(state.collectThread); state.collectThread = nil end
+    if keyrelease then pcall(keyrelease, 0x45) end
+end
+
+
+local function refreshNpcCache()
+    if not state.npcESP then return end
+    local now = os.clock()
+    if now - state.npcCacheLastRefresh < 0.2 then return end
+    state.npcCacheLastRefresh = now
+    state.npcCache = {}
+
+    local liveFolder = workspace:FindFirstChild("Live")
+    if not liveFolder then return end
+
+    for _, npc in ipairs(liveFolder:GetChildren()) do
+        pcall(function()
+            if not npc:IsA("Model") then return end
+            if npc.Name == player.Name or npc.Name == "Server" then return end
+            if npc.Name:find("ostage") then return end
+            local humanoid = npc:FindFirstChild("Humanoid")
+            local hrp      = npc:FindFirstChild("HumanoidRootPart")
+            if humanoid and hrp and humanoid.Health > 0 then
+                table.insert(state.npcCache, npc)
+            end
+        end)
+    end
+end
+
+local function getNpcDisplayName(model)
+    if not model then return "NPC" end
+    local ok, value = pcall(function() return model:GetAttribute("DisplayName") end)
+    if ok and type(value) == "string" and value ~= "" then return value end
+    return model.Name
+end
+
+
+local function getOrCreateItemBundle(instance)
+    if itemDrawings[instance] then return itemDrawings[instance] end
+
+    local box = Drawing.new("Square")
+    box.Filled = false; box.Thickness = 2; box.Visible = false; box.ZIndex = 2
+
+    local nameText = Drawing.new("Text")
+    nameText.Center = true; nameText.Outline = true
+    nameText.Font = Drawing.Fonts.SystemBold
+    nameText.Size = 14; nameText.Visible = false; nameText.ZIndex = 3
+
+    local distText = Drawing.new("Text")
+    distText.Center = true; distText.Outline = true
+    distText.Font = Drawing.Fonts.System
+    distText.Size = 12; distText.Visible = false; distText.ZIndex = 3
+
+    local tracer = Drawing.new("Line")
+    tracer.Thickness = 1; tracer.Visible = false; tracer.ZIndex = 1
+
+    local bundle = { box = box, nameText = nameText, distText = distText, tracer = tracer }
+    itemDrawings[instance] = bundle
+    return bundle
+end
+
+local function getOrCreateNpcBundle(model)
+    if npcDrawings[model] then return npcDrawings[model] end
+
+    local box = Drawing.new("Square")
+    box.Filled = false; box.Thickness = 2; box.Visible = false; box.ZIndex = 2
+
+    local nameText = Drawing.new("Text")
+    nameText.Center = true; nameText.Outline = true
+    nameText.Font = Drawing.Fonts.SystemBold
+    nameText.Size = 14; nameText.Visible = false; nameText.ZIndex = 3
+
+    local distText = Drawing.new("Text")
+    distText.Center = true; distText.Outline = true
+    distText.Font = Drawing.Fonts.System
+    distText.Size = 12; distText.Visible = false; distText.ZIndex = 3
+
+    local tracer = Drawing.new("Line")
+    tracer.Thickness = 1; tracer.Visible = false; tracer.ZIndex = 1
+
+    local bundle = { box = box, nameText = nameText, distText = distText, tracer = tracer }
+    npcDrawings[model] = bundle
+    return bundle
+end
+
+local function hideAllItemDrawings()
+    for _, b in pairs(itemDrawings) do
+        b.box.Visible = false; b.nameText.Visible = false
+        b.distText.Visible = false; b.tracer.Visible = false
+    end
+end
+
+local function hideAllNpcDrawings()
+    for _, b in pairs(npcDrawings) do
+        b.box.Visible = false; b.nameText.Visible = false
+        b.distText.Visible = false; b.tracer.Visible = false
+    end
+end
+
+local function removeAllItemDrawings()
+    for k, b in pairs(itemDrawings) do
+        b.box:Remove(); b.nameText:Remove(); b.distText:Remove(); b.tracer:Remove()
+        itemDrawings[k] = nil
+    end
+end
+
+local function removeAllNpcDrawings()
+    for k, b in pairs(npcDrawings) do
+        b.box:Remove(); b.nameText:Remove(); b.distText:Remove(); b.tracer:Remove()
+        npcDrawings[k] = nil
+    end
+end
+
+
+local function renderItemESP()
+    if not state.itemESP then hideAllItemDrawings(); return end
+
+    local camPos
+    local screenCX, screenBY = 400, 600
+    do
+        local ok, cam = pcall(function() return workspace.CurrentCamera end)
+        if ok and cam then
+            local okP, p = pcall(function() return cam.Position end)
+            if okP then camPos = p end
+            local okV, vp = pcall(function() return cam.ViewportSize end)
+            if okV and vp then
+                screenCX = math.floor(vp.x * 0.5)
+                screenBY = vp.y
+            end
+        end
+    end
+
+    local root    = getRootPart()
+    local rootPos = root and root.Position
+    local seenThisFrame = {}
+    local rendered = 0
+
+    for _, obj in ipairs(state.itemCache) do
+        if rendered >= state.maxRenderedItems then break end
+        if obj.Parent then
+            local okP, wpos = pcall(resolveWorldPosition, obj)
+            if okP and wpos then
+                local okW, spos, onScreen = pcall(WorldToScreen, wpos)
+                if okW and onScreen and spos then
+                    local bundle = getOrCreateItemBundle(obj)
+                    seenThisFrame[obj] = true
+                    rendered = rendered + 1
+
+                    local color = state.itemColors[obj.Name] or Color3.fromRGB(255, 255, 255)
+
+                    local dist = camPos and distance3D(camPos, wpos) or 80
+                    local h = math.max(12, math.min(80, 1200 / math.max(dist, 1)))
+                    local w = h * 0.75
+
+                    bundle.box.Color = color
+                    bundle.box.Thickness = 2
+                    bundle.box.Size = Vector2.new(w, h)
+                    bundle.box.Position = Vector2.new(spos.X - w * 0.5, spos.Y - h * 0.5)
+                    bundle.box.Visible = state.espShowBox
+
+                    bundle.nameText.Text = obj.Name
+                    bundle.nameText.Color = color
+                    bundle.nameText.Position = Vector2.new(spos.X, spos.Y - h * 0.5 - 14)
+                    bundle.nameText.Visible = state.espShowName
+
+                    if rootPos then
+                        local d = math.floor(distance3D(wpos, rootPos))
+                        bundle.distText.Text = d .. " studs"
+                        bundle.distText.Color = color
+                        bundle.distText.Position = Vector2.new(spos.X, spos.Y + h * 0.5 + 2)
+                        bundle.distText.Visible = state.espShowDistance
+                    else
+                        bundle.distText.Visible = false
+                    end
+
+                    bundle.tracer.Color = color
+                    bundle.tracer.From = Vector2.new(screenCX, screenBY)
+                    bundle.tracer.To = Vector2.new(spos.X, spos.Y)
+                    bundle.tracer.Visible = state.espShowTracers
+                end
+            end
+        end
+    end
+
+    for instance, bundle in pairs(itemDrawings) do
+        if not seenThisFrame[instance] then
+            if instance.Parent then
+                bundle.box.Visible = false; bundle.nameText.Visible = false
+                bundle.distText.Visible = false; bundle.tracer.Visible = false
+            else
+                bundle.box:Remove(); bundle.nameText:Remove()
+                bundle.distText:Remove(); bundle.tracer:Remove()
+                itemDrawings[instance] = nil
+            end
+        end
+    end
+end
+
+
+local function renderNpcESP()
+    if not state.npcESP then hideAllNpcDrawings(); return end
+
+    refreshNpcCache()
+
+    local camPos
+    local screenCX, screenBY = 400, 600
+    do
+        local ok, cam = pcall(function() return workspace.CurrentCamera end)
+        if ok and cam then
+            local okP, p = pcall(function() return cam.Position end)
+            if okP then camPos = p end
+            local okV, vp = pcall(function() return cam.ViewportSize end)
+            if okV and vp then
+                screenCX = math.floor(vp.x * 0.5)
+                screenBY = vp.y
+            end
+        end
+    end
+
+    local root    = getRootPart()
+    local rootPos = root and root.Position
+    local seenThisFrame = {}
+
+    for _, npc in ipairs(state.npcCache) do
+        if not npc.Parent then continue end
+        local hrp = npc:FindFirstChild("HumanoidRootPart")
+        if not hrp then continue end
+
+        local wpos = hrp.Position
+        if rootPos then
+            local d = distance3D(wpos, rootPos)
+            if d > state.npcMaxDistance then continue end
+        end
+
+        local okW, spos, onScreen = pcall(WorldToScreen, wpos)
+        if not okW or not onScreen or not spos then continue end
+
+        local bundle = getOrCreateNpcBundle(npc)
+        seenThisFrame[npc] = true
+        local color = state.npcColor
+
+        local dist = camPos and distance3D(camPos, wpos) or 80
+        local h = math.max(20, math.min(120, 2400 / math.max(dist, 1)))
+        local w = h * 0.6
+
+        bundle.box.Color = color
+        bundle.box.Thickness = 2
+        bundle.box.Size = Vector2.new(w, h)
+        bundle.box.Position = Vector2.new(spos.X - w * 0.5, spos.Y - h * 0.5)
+        bundle.box.Visible = state.npcShowBox
+
+        local displayName = getNpcDisplayName(npc)
+        bundle.nameText.Text = displayName
+        bundle.nameText.Color = color
+        bundle.nameText.Position = Vector2.new(spos.X, spos.Y - h * 0.5 - 14)
+        bundle.nameText.Visible = state.npcShowName
+
+        if rootPos and state.npcShowDistance then
+            local d = math.floor(distance3D(wpos, rootPos))
+            bundle.distText.Text = d .. " studs"
+            bundle.distText.Color = color
+            bundle.distText.Position = Vector2.new(spos.X, spos.Y + h * 0.5 + 2)
+            bundle.distText.Visible = true
+        else
+            bundle.distText.Visible = false
+        end
+
+        bundle.tracer.Color = color
+        bundle.tracer.From = Vector2.new(screenCX, screenBY)
+        bundle.tracer.To = Vector2.new(spos.X, spos.Y)
+        bundle.tracer.Visible = state.npcShowTracers
+    end
+
+    for model, bundle in pairs(npcDrawings) do
+        if not seenThisFrame[model] then
+            if model.Parent then
+                bundle.box.Visible = false; bundle.nameText.Visible = false
+                bundle.distText.Visible = false; bundle.tracer.Visible = false
+            else
+                bundle.box:Remove(); bundle.nameText:Remove()
+                bundle.distText:Remove(); bundle.tracer:Remove()
+                npcDrawings[model] = nil
+            end
+        end
+    end
+end
+
+ui:SetMenuTitle("jade | bizzare lineage")
+ui:SetMenuSize(Vector2.new(620, 580))
+ui:CenterMenu()
+ui:SetWatermarkEnabled(true)
+
+local tabMain = ui:Tab("Main")
+
+
+local npcSection = tabMain:Section("NPC Killer")
+
+local npcToggle = npcSection:Toggle("NPC Killer", false, function(enabled)
+    state.npcKillerEnabled = enabled
+    if enabled then
+        startNpcKillerForCurrentMethod()
+    else
+        stopAllNpcKillerLoops()
+        state.raidTarget = nil
+    end
+end, false, "Automatically farms NPCs with selected method")
+npcToggle:AddKeybind("mb4", "Toggle", true)
+
+local farmingMethods = { "Under", "Back", "Top", "Orbit" }
+
+npcSection:Dropdown("Method", { "Under" }, farmingMethods, false, function(selected)
+    local method = "Under"
+    if type(selected) == "table" then
+        method = selected[1] or "Under"
+    elseif type(selected) == "string" then
+        method = selected
+    end
+    state.npcMethod = method
+    if state.npcKillerEnabled then
+        startNpcKillerForCurrentMethod()
+    end
+end)
+
+
+local methodTabs = tabMain:TabbedSection({"Orbit", "Under", "Back", "Top"})
+
+methodTabs["Orbit"]:Slider("Radius", state.orbitRadius, 1, 3, 20, " studs", function(v) state.orbitRadius = v end)
+methodTabs["Orbit"]:Slider("Speed", state.orbitSpeed, 1, 1, 10, "x", function(v) state.orbitSpeed = v end)
+methodTabs["Under"]:Slider("Depth", state.underDepth, 1, 1, 50, " studs", function(v) state.underDepth = v end)
+methodTabs["Back"]:Slider("Distance", state.backDistance, 1, 1, 50, " studs", function(v) state.backDistance = v end)
+methodTabs["Top"]:Slider("Height", state.topHeight, 1, 1, 50, " studs", function(v) state.topHeight = v end)
+
+
+local itemsSection = tabMain:Section("Item Pickup")
+
+local autoCollectToggle = itemsSection:Toggle("Auto Collect", false, function(enabled)
+    state.autoCollect = enabled
+    if enabled then startAutoCollect() else stopAutoCollect() end
+end, false, "Collect selected items automatically")
+autoCollectToggle:AddKeybind("b", "Toggle", true)
+
+itemsSection:Toggle("Safe Spot", state.collectSafeSpot, function(v)
+    state.collectSafeSpot = v
+end, false, "Return to safe spot when nothing to pick up")
+
+itemsSection:Dropdown("Target Items", {}, trackedItemNames, true, function(selected)
+    state.collectTargetNames = {}
+    for _, name in ipairs(selected) do
+        state.collectTargetNames[name] = true
+    end
+end)
+
+
+local tabESP = ui:Tab("ESP")
+local espTabs = tabESP:TabbedSection({"NPCs", "Items"})
+
+local npcEspSection = espTabs["NPCs"]
+
+npcEspSection:Toggle("NPC ESP", false, function(enabled)
+    state.npcESP = enabled
+    if not enabled then hideAllNpcDrawings() end
+end, false, "Show ESP for NPCs")
+
+npcEspSection:Toggle("Show Boxes", state.npcShowBox, function(v) state.npcShowBox = v end)
+npcEspSection:Toggle("Show Names", state.npcShowName, function(v) state.npcShowName = v end)
+npcEspSection:Toggle("Show Distance", state.npcShowDistance, function(v) state.npcShowDistance = v end)
+npcEspSection:Toggle("Tracers", state.npcShowTracers, function(v) state.npcShowTracers = v end)
+npcEspSection:Slider("Max Distance", state.npcMaxDistance, 25, 50, 3000, " studs", function(v) state.npcMaxDistance = v end)
+
+local itemEspSection = espTabs["Items"]
+
+itemEspSection:Toggle("Item ESP", false, function(enabled)
+    state.itemESP = enabled
+    if enabled then
+        state.itemScanInitialized  = false
+        state.itemCacheLastRefresh = 0
+    else
+        hideAllItemDrawings()
+    end
+end, false, "Show ESP for items")
+
+itemEspSection:Toggle("Show Box", state.espShowBox, function(v) state.espShowBox = v end)
+itemEspSection:Toggle("Show Name", state.espShowName, function(v) state.espShowName = v end)
+itemEspSection:Toggle("Show Distance", state.espShowDistance, function(v) state.espShowDistance = v end)
+itemEspSection:Toggle("Tracers", state.espShowTracers, function(v) state.espShowTracers = v end)
+
+
+local colorsSection = tabESP:Section("Colors")
+
+local npcColorToggle = colorsSection:Toggle("NPC Color", true, function() end)
+npcColorToggle:AddColorpicker("Value", state.npcColor, false, function(color) state.npcColor = color end)
+
+for _, item in ipairs(trackedItems) do
+    local t = colorsSection:Toggle(item.short, true, function() end)
+    t:AddColorpicker("Color", item.color, false, function(newColor)
+        state.itemColors[item.name] = newColor
+    end)
+end
+
+
+local _, settingsSection = ui:CreateSettingsTab("Settings")
+settingsSection:Button("Unload", function() state.shouldUnload = true end)
+_G.__bizzareLineageUnload = function() state.shouldUnload = true end
+
+
+local function updateFrame(deltaTime)
+    if state.itemESP or state.autoCollect then
+        refreshItemCache()
+    end
+    renderItemESP()
+    renderNpcESP()
+end
+
+local function safeUpdateFrame(deltaTime)
+    local now = os.clock()
+    if now < state.runtimeCooldownUntil then return end
+    local ok = pcall(updateFrame, deltaTime)
+    if ok then
+        state.frameErrorCount = math.max(0, state.frameErrorCount - 1)
+        return
+    end
+    state.frameErrorCount = state.frameErrorCount + 1
+    if state.frameErrorCount >= 20 then
+        state.itemESP          = false
+        state.npcESP           = false
+        state.autoCollect      = false
+        state.npcKillerEnabled = false
+        stopAutoCollect()
+        stopAllNpcKillerLoops()
+        hideAllItemDrawings()
+        hideAllNpcDrawings()
+        state.runtimeCooldownUntil = now + 1.5
+        state.frameErrorCount = 0
+    end
+end
+
+
+local frameLoopAlive = true
+task.spawn(function()
+    while frameLoopAlive and not state.shouldUnload do
+        safeUpdateFrame(config.fallbackDeltaTime)
+        task.wait()
+    end
+end)
+
+while not state.shouldUnload do
+    ui:Step()
+    task.wait()
+end
+
+frameLoopAlive = false
+stopAutoCollect()
+stopAllNpcKillerLoops()
+removeAllItemDrawings()
+removeAllNpcDrawings()
+ui:Unload()
