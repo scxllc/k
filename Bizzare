@@ -787,6 +787,7 @@ ui:SetMenuTitle("jade | bizzare lineage")
 ui:SetMenuSize(Vector2.new(620, 580))
 ui:CenterMenu()
 ui:SetWatermarkEnabled(true)
+ui:SetBlockRobloxInput(false)
 
 local tabMain = ui:Tab("Main")
 
