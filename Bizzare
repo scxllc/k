@@ -203,6 +203,17 @@ task.spawn(function()
 end)
 
 
+local function getPlayerNames()
+    local names = {}
+    local ok, list = pcall(function() return players:GetPlayers() end)
+    if ok and list then
+        for _, p in ipairs(list) do
+            names[p.Name] = true
+        end
+    end
+    return names
+end
+
 local function getClosestRaidNPC()
     local myChar = player.Character
     if not myChar then return nil end
@@ -212,10 +223,12 @@ local function getClosestRaidNPC()
     if not liveFolder then return nil end
     local myPos = myHRP.Position
     local closestDist, closestNPC = math.huge, nil
+    local playerNames = getPlayerNames()
 
     for _, npc in ipairs(liveFolder:GetChildren()) do
         pcall(function()
-            if npc.Name == player.Name or npc.Name == "Server" then return end
+            if playerNames[npc.Name] then return end
+            if npc.Name == "Server" then return end
             if not npc:IsA("Model") then return end
             if npc.Name:find("ostage") then return end
             local humanoid = npc:FindFirstChild("Humanoid")
@@ -511,10 +524,13 @@ local function refreshNpcCache()
     local liveFolder = workspace:FindFirstChild("Live")
     if not liveFolder then return end
 
+    local playerNames = getPlayerNames()
+
     for _, npc in ipairs(liveFolder:GetChildren()) do
         pcall(function()
             if not npc:IsA("Model") then return end
-            if npc.Name == player.Name or npc.Name == "Server" then return end
+            if playerNames[npc.Name] then return end
+            if npc.Name == "Server" then return end
             if npc.Name:find("ostage") then return end
             local humanoid = npc:FindFirstChild("Humanoid")
             local hrp      = npc:FindFirstChild("HumanoidRootPart")
