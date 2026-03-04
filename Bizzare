@@ -66,16 +66,6 @@ local state = {
     itemScanInitialized      = false,
     itemColors               = {},
 
-    npcESP                   = false,
-    npcShowBox               = true,
-    npcShowName              = true,
-    npcShowDistance           = true,
-    npcShowTracers           = true,
-    npcMaxDistance            = config.npcMaxDistance,
-    npcColor                 = Color3.fromRGB(0, 200, 120),
-    npcCache                 = {},
-    npcCacheLastRefresh      = 0,
-
     frameErrorCount          = 0,
     runtimeCooldownUntil     = 0,
 
@@ -86,7 +76,7 @@ local state = {
 
     raidTarget               = nil,
     npcKillerEnabled         = false,
-    npcMethod                = "Under",
+    npcMethod                = "Top",
     orbitRadius              = 8,
     orbitSpeed               = 2,
     orbitThread              = nil,
@@ -94,7 +84,7 @@ local state = {
     underThread              = nil,
     backDistance              = 6,
     backThread               = nil,
-    topHeight                = 6,
+    topHeight                = 8,
     topThread                = nil,
 }
 
@@ -108,7 +98,6 @@ if _G.__bizzareLineageUnload then
 end
 
 local itemDrawings = {}
-local npcDrawings  = {}
 
 
 local function distance3D(a, b)
@@ -514,40 +503,6 @@ local function stopAutoCollect()
 end
 
 
-local function refreshNpcCache()
-    if not state.npcESP then return end
-    local now = os.clock()
-    if now - state.npcCacheLastRefresh < 0.2 then return end
-    state.npcCacheLastRefresh = now
-    state.npcCache = {}
-
-    local liveFolder = workspace:FindFirstChild("Live")
-    if not liveFolder then return end
-
-    local playerNames = getPlayerNames()
-
-    for _, npc in ipairs(liveFolder:GetChildren()) do
-        pcall(function()
-            if not npc:IsA("Model") then return end
-            if playerNames[npc.Name] then return end
-            if npc.Name == "Server" then return end
-            if npc.Name:find("ostage") then return end
-            local humanoid = npc:FindFirstChild("Humanoid")
-            local hrp      = npc:FindFirstChild("HumanoidRootPart")
-            if humanoid and hrp and humanoid.Health > 0 then
-                table.insert(state.npcCache, npc)
-            end
-        end)
-    end
-end
-
-local function getNpcDisplayName(model)
-    if not model then return "NPC" end
-    local ok, value = pcall(function() return model:GetAttribute("DisplayName") end)
-    if ok and type(value) == "string" and value ~= "" then return value end
-    return model.Name
-end
-
 
 local function getOrCreateItemBundle(instance)
     if itemDrawings[instance] then return itemDrawings[instance] end
@@ -573,39 +528,9 @@ local function getOrCreateItemBundle(instance)
     return bundle
 end
 
-local function getOrCreateNpcBundle(model)
-    if npcDrawings[model] then return npcDrawings[model] end
-
-    local box = Drawing.new("Square")
-    box.Filled = false; box.Thickness = 2; box.Visible = false; box.ZIndex = 2
-
-    local nameText = Drawing.new("Text")
-    nameText.Center = true; nameText.Outline = true
-    nameText.Font = Drawing.Fonts.SystemBold
-    nameText.Size = 14; nameText.Visible = false; nameText.ZIndex = 3
-
-    local distText = Drawing.new("Text")
-    distText.Center = true; distText.Outline = true
-    distText.Font = Drawing.Fonts.System
-    distText.Size = 12; distText.Visible = false; distText.ZIndex = 3
-
-    local tracer = Drawing.new("Line")
-    tracer.Thickness = 1; tracer.Visible = false; tracer.ZIndex = 1
-
-    local bundle = { box = box, nameText = nameText, distText = distText, tracer = tracer }
-    npcDrawings[model] = bundle
-    return bundle
-end
 
 local function hideAllItemDrawings()
     for _, b in pairs(itemDrawings) do
-        b.box.Visible = false; b.nameText.Visible = false
-        b.distText.Visible = false; b.tracer.Visible = false
-    end
-end
-
-local function hideAllNpcDrawings()
-    for _, b in pairs(npcDrawings) do
         b.box.Visible = false; b.nameText.Visible = false
         b.distText.Visible = false; b.tracer.Visible = false
     end
@@ -618,12 +543,7 @@ local function removeAllItemDrawings()
     end
 end
 
-local function removeAllNpcDrawings()
-    for k, b in pairs(npcDrawings) do
-        b.box:Remove(); b.nameText:Remove(); b.distText:Remove(); b.tracer:Remove()
-        npcDrawings[k] = nil
-    end
-end
+
 
 
 local function renderItemESP()
@@ -710,95 +630,6 @@ local function renderItemESP()
     end
 end
 
-
-local function renderNpcESP()
-    if not state.npcESP then hideAllNpcDrawings(); return end
-
-    refreshNpcCache()
-
-    local camPos
-    local screenCX, screenBY = 400, 600
-    do
-        local ok, cam = pcall(function() return workspace.CurrentCamera end)
-        if ok and cam then
-            local okP, p = pcall(function() return cam.Position end)
-            if okP then camPos = p end
-            local okV, vp = pcall(function() return cam.ViewportSize end)
-            if okV and vp then
-                screenCX = math.floor(vp.x * 0.5)
-                screenBY = vp.y
-            end
-        end
-    end
-
-    local root    = getRootPart()
-    local rootPos = root and root.Position
-    local seenThisFrame = {}
-
-    for _, npc in ipairs(state.npcCache) do
-        if not npc.Parent then continue end
-        local hrp = npc:FindFirstChild("HumanoidRootPart")
-        if not hrp then continue end
-
-        local wpos = hrp.Position
-        if rootPos then
-            local d = distance3D(wpos, rootPos)
-            if d > state.npcMaxDistance then continue end
-        end
-
-        local okW, spos, onScreen = pcall(WorldToScreen, wpos)
-        if not okW or not onScreen or not spos then continue end
-
-        local bundle = getOrCreateNpcBundle(npc)
-        seenThisFrame[npc] = true
-        local color = state.npcColor
-
-        local dist = camPos and distance3D(camPos, wpos) or 80
-        local h = math.max(20, math.min(120, 2400 / math.max(dist, 1)))
-        local w = h * 0.6
-
-        bundle.box.Color = color
-        bundle.box.Thickness = 2
-        bundle.box.Size = Vector2.new(w, h)
-        bundle.box.Position = Vector2.new(spos.X - w * 0.5, spos.Y - h * 0.5)
-        bundle.box.Visible = state.npcShowBox
-
-        local displayName = getNpcDisplayName(npc)
-        bundle.nameText.Text = displayName
-        bundle.nameText.Color = color
-        bundle.nameText.Position = Vector2.new(spos.X, spos.Y - h * 0.5 - 14)
-        bundle.nameText.Visible = state.npcShowName
-
-        if rootPos and state.npcShowDistance then
-            local d = math.floor(distance3D(wpos, rootPos))
-            bundle.distText.Text = d .. " studs"
-            bundle.distText.Color = color
-            bundle.distText.Position = Vector2.new(spos.X, spos.Y + h * 0.5 + 2)
-            bundle.distText.Visible = true
-        else
-            bundle.distText.Visible = false
-        end
-
-        bundle.tracer.Color = color
-        bundle.tracer.From = Vector2.new(screenCX, screenBY)
-        bundle.tracer.To = Vector2.new(spos.X, spos.Y)
-        bundle.tracer.Visible = state.npcShowTracers
-    end
-
-    for model, bundle in pairs(npcDrawings) do
-        if not seenThisFrame[model] then
-            if model.Parent then
-                bundle.box.Visible = false; bundle.nameText.Visible = false
-                bundle.distText.Visible = false; bundle.tracer.Visible = false
-            else
-                bundle.box:Remove(); bundle.nameText:Remove()
-                bundle.distText:Remove(); bundle.tracer:Remove()
-                npcDrawings[model] = nil
-            end
-        end
-    end
-end
-
 ui:SetMenuTitle("jade | bizzare lineage")
 ui:SetMenuSize(Vector2.new(620, 580))
 ui:CenterMenu()
@@ -823,10 +654,10 @@ npcToggle:AddKeybind("mb4", "Toggle", true)
 
 local farmingMethods = { "Under", "Back", "Top", "Orbit" }
 
-npcSection:Dropdown("Method", { "Under" }, farmingMethods, false, function(selected)
-    local method = "Under"
+npcSection:Dropdown("Method", { "Top" }, farmingMethods, false, function(selected)
+    local method = "Top"
     if type(selected) == "table" then
-        method = selected[1] or "Under"
+        method = selected[1] or "Top"
     elseif type(selected) == "string" then
         method = selected
     end
@@ -867,24 +698,9 @@ end)
 
 
 local tabESP = ui:Tab("ESP")
-local espTabs = tabESP:TabbedSection({"NPCs", "Items"})
+local espSection = tabESP:Section("Item ESP")
 
-local npcEspSection = espTabs["NPCs"]
-
-npcEspSection:Toggle("NPC ESP", false, function(enabled)
-    state.npcESP = enabled
-    if not enabled then hideAllNpcDrawings() end
-end, false, "Show ESP for NPCs")
-
-npcEspSection:Toggle("Show Boxes", state.npcShowBox, function(v) state.npcShowBox = v end)
-npcEspSection:Toggle("Show Names", state.npcShowName, function(v) state.npcShowName = v end)
-npcEspSection:Toggle("Show Distance", state.npcShowDistance, function(v) state.npcShowDistance = v end)
-npcEspSection:Toggle("Tracers", state.npcShowTracers, function(v) state.npcShowTracers = v end)
-npcEspSection:Slider("Max Distance", state.npcMaxDistance, 25, 50, 3000, " studs", function(v) state.npcMaxDistance = v end)
-
-local itemEspSection = espTabs["Items"]
-
-itemEspSection:Toggle("Item ESP", false, function(enabled)
+espSection:Toggle("Item ESP", false, function(enabled)
     state.itemESP = enabled
     if enabled then
         state.itemScanInitialized  = false
@@ -894,16 +710,13 @@ itemEspSection:Toggle("Item ESP", false, function(enabled)
     end
 end, false, "Show ESP for items")
 
-itemEspSection:Toggle("Show Box", state.espShowBox, function(v) state.espShowBox = v end)
-itemEspSection:Toggle("Show Name", state.espShowName, function(v) state.espShowName = v end)
-itemEspSection:Toggle("Show Distance", state.espShowDistance, function(v) state.espShowDistance = v end)
-itemEspSection:Toggle("Tracers", state.espShowTracers, function(v) state.espShowTracers = v end)
+espSection:Toggle("Show Box", state.espShowBox, function(v) state.espShowBox = v end)
+espSection:Toggle("Show Name", state.espShowName, function(v) state.espShowName = v end)
+espSection:Toggle("Show Distance", state.espShowDistance, function(v) state.espShowDistance = v end)
+espSection:Toggle("Tracers", state.espShowTracers, function(v) state.espShowTracers = v end)
 
 
 local colorsSection = tabESP:Section("Colors")
-
-local npcColorToggle = colorsSection:Toggle("NPC Color", true, function() end)
-npcColorToggle:AddColorpicker("Value", state.npcColor, false, function(color) state.npcColor = color end)
 
 for _, item in ipairs(trackedItems) do
     local t = colorsSection:Toggle(item.short, true, function() end)
@@ -923,7 +736,6 @@ local function updateFrame(deltaTime)
         refreshItemCache()
     end
     renderItemESP()
-    renderNpcESP()
 end
 
 local function safeUpdateFrame(deltaTime)
@@ -937,13 +749,11 @@ local function safeUpdateFrame(deltaTime)
     state.frameErrorCount = state.frameErrorCount + 1
     if state.frameErrorCount >= 20 then
         state.itemESP          = false
-        state.npcESP           = false
         state.autoCollect      = false
         state.npcKillerEnabled = false
         stopAutoCollect()
         stopAllNpcKillerLoops()
         hideAllItemDrawings()
-        hideAllNpcDrawings()
         state.runtimeCooldownUntil = now + 1.5
         state.frameErrorCount = 0
     end
@@ -967,5 +777,4 @@ frameLoopAlive = false
 stopAutoCollect()
 stopAllNpcKillerLoops()
 removeAllItemDrawings()
-removeAllNpcDrawings()
 ui:Unload()
